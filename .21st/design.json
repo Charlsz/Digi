@@ -1,0 +1,12 @@
+{
+  "decisions": [
+    {
+      "date": "2026-09-26",
+      "name": "Quiet paper desk",
+      "choice": "A fixed portrait sheet on a warm paper field, with a thin tool rail and an archive of saved sheets.",
+      "palette": ["#FDFDFC", "#111111", "#9C9C9B", "#F4F4F2", "#E4E4E2"],
+      "type": "Inter",
+      "notes": "21st catalog galleries were motion-heavy bento and accordion layouts, so the desk was drawn for this palette instead of installing one."
+    }
+  ]
+}
