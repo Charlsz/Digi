@@ -1,47 +1,47 @@
 import { deleteDrawing, getDrawing, updateDrawing } from "@/lib/drawings"
-import { DrawingInputError, parseDrawingInput } from "@/lib/drawing-input"
+import { parseDrawingInput } from "@/lib/drawing-input"
+import { jsonError, jsonOk, readJson } from "@/lib/http"
+import { isDrawingId } from "@/lib/ids"
 
-const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+function notFound() {
+  return jsonOk({ error: "Not found." }, { status: 404 })
+}
 
 export async function GET(_request: Request, ctx: RouteContext<"/api/drawings/[id]">) {
   const { id } = await ctx.params
-  if (!ID.test(id)) return Response.json({ error: "Not found." }, { status: 404 })
+  if (!isDrawingId(id)) return notFound()
 
   try {
     const drawing = await getDrawing(id)
-    if (!drawing) return Response.json({ error: "Not found." }, { status: 404 })
-    return Response.json({ drawing })
+    if (!drawing) return notFound()
+    return jsonOk({ drawing })
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not open the drawing."
-    return Response.json({ error: message }, { status: 500 })
+    return jsonError(error, "Could not open the drawing.")
   }
 }
 
 export async function PUT(request: Request, ctx: RouteContext<"/api/drawings/[id]">) {
   const { id } = await ctx.params
-  if (!ID.test(id)) return Response.json({ error: "Not found." }, { status: 404 })
+  if (!isDrawingId(id)) return notFound()
 
   try {
-    const input = parseDrawingInput(await request.json())
+    const input = parseDrawingInput(await readJson(request))
     const drawing = await updateDrawing(id, input)
-    if (!drawing) return Response.json({ error: "Not found." }, { status: 404 })
-    return Response.json({ drawing })
+    if (!drawing) return notFound()
+    return jsonOk({ drawing })
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not save the drawing."
-    const status = error instanceof DrawingInputError ? 400 : 500
-    return Response.json({ error: message }, { status })
+    return jsonError(error, "Could not save the drawing.")
   }
 }
 
 export async function DELETE(_request: Request, ctx: RouteContext<"/api/drawings/[id]">) {
   const { id } = await ctx.params
-  if (!ID.test(id)) return Response.json({ error: "Not found." }, { status: 404 })
+  if (!isDrawingId(id)) return notFound()
 
   try {
     await deleteDrawing(id)
-    return Response.json({ ok: true })
+    return jsonOk({ ok: true })
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not delete the drawing."
-    return Response.json({ error: message }, { status: 500 })
+    return jsonError(error, "Could not delete the drawing.")
   }
 }
