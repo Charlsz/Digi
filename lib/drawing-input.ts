@@ -69,11 +69,18 @@ export function parseDrawingInput(value: unknown): DrawingInput {
           typeof p !== "number" ||
           typeof t !== "number" ||
           !Number.isFinite(x) ||
-          !Number.isFinite(y)
+          !Number.isFinite(y) ||
+          !Number.isFinite(p) ||
+          !Number.isFinite(t)
         ) {
           throw new DrawingInputError("A point could not be read.")
         }
-        return { x, y, p, t }
+        return {
+          x,
+          y,
+          p: Math.min(1, Math.max(0, p)),
+          t,
+        }
       }),
     }
   })
