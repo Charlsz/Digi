@@ -107,7 +107,6 @@ export async function updateDrawing(
       height: input.height,
       strokes: input.strokes,
       preview: input.preview,
-      updated_at: new Date().toISOString(),
     })
     .eq("id", id)
     .select("id, title, style, width, height, preview, created_at, updated_at")
