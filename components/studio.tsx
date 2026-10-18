@@ -1,8 +1,12 @@
 "use client"
 
 import { useRouter, useSearchParams } from "next/navigation"
-import { useEffect, useRef, useState } from "react"
-import { drawStroke, redrawStrokes } from "@/lib/render"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { StudioSidebar } from "@/components/studio-sidebar"
+import { useSheetCanvas } from "@/hooks/use-sheet-canvas"
+import { clearDraft, readDraft, writeDraft } from "@/lib/drafts"
+import { fetchDrawing, saveDrawing } from "@/lib/drawing-client"
+import { fileSlug } from "@/lib/slug"
 import {
   BRUSHES,
   ERASER,
@@ -11,49 +15,8 @@ import {
   SHEET_WIDTH,
   isBrushId,
   type BrushId,
-  type Point,
-  type Stroke,
   type ToolId,
 } from "@/lib/types"
-
-const FOLLOW: Record<ToolId, number> = {
-  sketch: 0.62,
-  manga: 0.4,
-  tone: 0.55,
-  sumi: 0.34,
-  pencil: 0.82,
-  marker: 0.5,
-  eraser: 0.72,
-}
-
-function sheetPoint(event: PointerEvent, canvas: HTMLCanvasElement): Point {
-  const rect = canvas.getBoundingClientRect()
-  const pressure =
-    event.pointerType === "mouse" ? 0.65 : Math.min(1, Math.max(0.05, event.pressure || 0.5))
-  return {
-    x: ((event.clientX - rect.left) / Math.max(rect.width, 1)) * SHEET_WIDTH,
-    y: ((event.clientY - rect.top) / Math.max(rect.height, 1)) * SHEET_HEIGHT,
-    p: pressure,
-    t: event.timeStamp,
-  }
-}
-
-function pull(previous: Point, next: Point, amount: number): Point {
-  return {
-    x: previous.x + (next.x - previous.x) * amount,
-    y: previous.y + (next.y - previous.y) * amount,
-    p: next.p,
-    t: next.t,
-  }
-}
-
-function fileName(title: string) {
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-  return slug || "untitled"
-}
 
 export function Studio() {
   const router = useRouter()
@@ -62,17 +25,10 @@ export function Studio() {
 
   const frameRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const inkRef = useRef<HTMLCanvasElement | null>(null)
-  const strokesRef = useRef<Stroke[]>([])
-  const redoRef = useRef<Stroke[]>([])
-  const currentRef = useRef<Stroke | null>(null)
-  const drawingRef = useRef(false)
-  const commitRef = useRef<() => void>(() => {})
   const loadedIdRef = useRef<string | null>(null)
-  const toolRef = useRef<ToolId>("sketch")
-  const sizeRef = useRef<number>(BRUSHES[0].width)
-  const colorRef = useRef<string>(INKS[0].hex)
   const styleRef = useRef<BrushId>("sketch")
+  const dirtyRef = useRef(false)
+  const draftReadyRef = useRef(false)
   const undoRef = useRef<() => void>(() => {})
   const redoActionRef = useRef<() => void>(() => {})
 
@@ -84,129 +40,94 @@ export function Studio() {
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState({ undo: 0, redo: 0 })
-  const [sheet, setSheet] = useState({ width: 280, height: 392 })
 
-  toolRef.current = tool
-  sizeRef.current = size
-  colorRef.current = color
+  const onStrokeCommitted = useCallback((strokeCount: number) => {
+    setDirty(true)
+    setStatus("")
+    setHistory({ undo: strokeCount, redo: 0 })
+  }, [])
+
+  const {
+    sheet,
+    strokesRef,
+    redoRef,
+    inkRef,
+    commit,
+    setToolRefs,
+  } = useSheetCanvas({
+    frameRef,
+    canvasRef,
+    onStrokeCommitted,
+  })
 
   useEffect(() => {
-    const frame = frameRef.current
-    const canvas = canvasRef.current
-    if (!frame || !canvas) return
+    setToolRefs(tool, size, color)
+  }, [tool, size, color, setToolRefs])
 
-    const ink = document.createElement("canvas")
-    const ratio = window.devicePixelRatio || 1
-    ink.width = Math.round(SHEET_WIDTH * ratio)
-    ink.height = Math.round(SHEET_HEIGHT * ratio)
-    canvas.width = ink.width
-    canvas.height = ink.height
-    inkRef.current = ink
+  useEffect(() => {
+    dirtyRef.current = dirty
+  }, [dirty])
 
-    const paint = () => {
-      const ctx = canvas.getContext("2d")
-      if (!ctx) return
-      ctx.setTransform(1, 0, 0, 1, 0, 0)
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.drawImage(ink, 0, 0)
-      if (!currentRef.current) return
-      ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
-      drawStroke(ctx, currentRef.current)
-    }
+  function rememberHistory() {
+    setHistory({
+      undo: strokesRef.current.length,
+      redo: redoRef.current.length,
+    })
+  }
 
-    const commit = () => {
-      const ctx = ink.getContext("2d")
-      if (!ctx) return
-      redrawStrokes(ctx, strokesRef.current, ink.width, ink.height, ratio)
-      paint()
-    }
+  function markDirty(next = true) {
+    setDirty(next)
+    if (next) setStatus("")
+  }
 
-    commitRef.current = commit
+  useEffect(() => {
+    if (requestedId) return
+    if (draftReadyRef.current) return
+    draftReadyRef.current = true
+
+    const draft = readDraft()
+    if (!draft || draft.strokes.length === 0 || draft.drawingId) return
+
+    strokesRef.current = draft.strokes
+    redoRef.current = []
+    // Restoring local draft state from storage after mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate from localStorage once
+    setTitle(draft.title)
+    setTool(draft.tool)
+    styleRef.current = draft.style
+    setSize(draft.size)
+    setColor(draft.color)
+    setDirty(true)
+    setHistory({ undo: draft.strokes.length, redo: 0 })
+    setStatus("Restored draft")
     commit()
+  }, [requestedId, strokesRef, redoRef, commit])
 
-    const fit = () => {
-      const bounds = frame.getBoundingClientRect()
-      const pad = bounds.width < 720 ? 20 : 40
-      const scale = Math.min(
-        (bounds.width - pad * 2) / SHEET_WIDTH,
-        (bounds.height - pad * 2) / SHEET_HEIGHT,
-      )
-      const next = Math.max(scale, 0.18)
-      setSheet({
-        width: Math.max(1, Math.floor(SHEET_WIDTH * next)),
-        height: Math.max(1, Math.floor(SHEET_HEIGHT * next)),
+  useEffect(() => {
+    if (!dirty) return
+    const timer = window.setTimeout(() => {
+      writeDraft({
+        title,
+        tool,
+        style: styleRef.current,
+        size,
+        color,
+        strokes: strokesRef.current,
+        drawingId: loadedIdRef.current,
+        savedAt: new Date().toISOString(),
       })
-    }
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [dirty, title, tool, size, color, strokesRef, history])
 
-    fit()
-    const observer = new ResizeObserver(fit)
-    observer.observe(frame)
-
-    const onDown = (event: PointerEvent) => {
-      if (event.button !== 0) return
+  useEffect(() => {
+    function onBeforeUnload(event: BeforeUnloadEvent) {
+      if (!dirtyRef.current) return
       event.preventDefault()
-      try {
-        canvas.setPointerCapture(event.pointerId)
-      } catch {
-        // Untrusted events cannot capture the pointer. The stroke still records.
-      }
-      currentRef.current = {
-        brush: toolRef.current,
-        color: colorRef.current,
-        size: sizeRef.current,
-        points: [sheetPoint(event, canvas)],
-      }
-      drawingRef.current = true
-      paint()
+      event.returnValue = ""
     }
-
-    const onMove = (event: PointerEvent) => {
-      const stroke = currentRef.current
-      if (!drawingRef.current || !stroke) return
-      const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : []
-      const events = coalesced.length > 0 ? coalesced : [event]
-      for (const item of events) {
-        const next = sheetPoint(item, canvas)
-        const previous = stroke.points[stroke.points.length - 1]
-        const followed = pull(previous, next, FOLLOW[stroke.brush])
-        if (Math.hypot(followed.x - previous.x, followed.y - previous.y) < 0.45) continue
-        stroke.points.push(followed)
-      }
-      paint()
-    }
-
-    const finish = (event: PointerEvent) => {
-      if (!drawingRef.current || !currentRef.current) return
-      drawingRef.current = false
-      try {
-        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
-      } catch {
-        // The pointer was never captured.
-      }
-      const stroke = currentRef.current
-      currentRef.current = null
-      if (stroke.points.length > 0) {
-        strokesRef.current.push(stroke)
-        redoRef.current = []
-        setDirty(true)
-        setHistory({ undo: strokesRef.current.length, redo: 0 })
-        setStatus("")
-      }
-      commit()
-    }
-
-    canvas.addEventListener("pointerdown", onDown)
-    canvas.addEventListener("pointermove", onMove)
-    canvas.addEventListener("pointerup", finish)
-    canvas.addEventListener("pointercancel", finish)
-
-    return () => {
-      observer.disconnect()
-      canvas.removeEventListener("pointerdown", onDown)
-      canvas.removeEventListener("pointermove", onMove)
-      canvas.removeEventListener("pointerup", finish)
-      canvas.removeEventListener("pointercancel", finish)
-    }
+    window.addEventListener("beforeunload", onBeforeUnload)
+    return () => window.removeEventListener("beforeunload", onBeforeUnload)
   }, [])
 
   useEffect(() => {
@@ -219,7 +140,7 @@ export function Studio() {
       setDirty(false)
       setHistory({ undo: 0, redo: 0 })
       setStatus("")
-      commitRef.current()
+      commit()
       return
     }
 
@@ -227,12 +148,7 @@ export function Studio() {
     let cancel = false
     setStatus("Opening")
 
-    fetch(`/api/drawings/${requestedId}`)
-      .then(async (response) => {
-        const body = (await response.json()) as { drawing?: { title: string; style: string; strokes: Stroke[] }; error?: string }
-        if (!response.ok || !body.drawing) throw new Error(body.error || "Could not open this sheet.")
-        return body.drawing
-      })
+    fetchDrawing(requestedId)
       .then((drawing) => {
         if (cancel) return
         strokesRef.current = drawing.strokes
@@ -246,9 +162,10 @@ export function Studio() {
           if (brush) setSize(brush.width)
         }
         setDirty(false)
+        clearDraft()
         setHistory({ undo: drawing.strokes.length, redo: 0 })
         setStatus("")
-        commitRef.current()
+        commit()
       })
       .catch((error: unknown) => {
         if (cancel) return
@@ -258,52 +175,73 @@ export function Studio() {
     return () => {
       cancel = true
     }
-  }, [requestedId])
+  }, [requestedId, strokesRef, redoRef, commit])
 
-  function rememberHistory() {
-    setHistory({ undo: strokesRef.current.length, redo: redoRef.current.length })
-  }
-
-  function undo() {
+  const undo = useCallback(() => {
     const stroke = strokesRef.current.pop()
     if (!stroke) return
     redoRef.current.push(stroke)
     setDirty(true)
     setStatus("")
-    rememberHistory()
-    commitRef.current()
-  }
+    setHistory({
+      undo: strokesRef.current.length,
+      redo: redoRef.current.length,
+    })
+    commit()
+  }, [strokesRef, redoRef, commit])
 
-  function redo() {
+  const redo = useCallback(() => {
     const stroke = redoRef.current.pop()
     if (!stroke) return
     strokesRef.current.push(stroke)
     setDirty(true)
     setStatus("")
-    rememberHistory()
-    commitRef.current()
-  }
-
-  undoRef.current = undo
-  redoActionRef.current = redo
+    setHistory({
+      undo: strokesRef.current.length,
+      redo: redoRef.current.length,
+    })
+    commit()
+  }, [strokesRef, redoRef, commit])
 
   useEffect(() => {
+    undoRef.current = undo
+    redoActionRef.current = redo
+  }, [undo, redo])
+
+  useEffect(() => {
+    function chooseFromKey(next: ToolId) {
+      setTool(next)
+      if (next === "eraser") {
+        setSize(ERASER.width)
+        return
+      }
+      styleRef.current = next
+      const brush = BRUSHES.find((item) => item.id === next)
+      if (brush) setSize(brush.width)
+    }
+
     function onKey(event: KeyboardEvent) {
       const target = event.target
       if (target instanceof HTMLElement && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
         return
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+      const key = event.key.toLowerCase()
+      if ((event.metaKey || event.ctrlKey) && key === "z") {
         event.preventDefault()
         if (event.shiftKey) redoActionRef.current()
         else undoRef.current()
         return
       }
+      if ((event.metaKey || event.ctrlKey) && key === "y") {
+        event.preventDefault()
+        redoActionRef.current()
+        return
+      }
       if (event.key === "[") setSize((value) => Math.max(1, value - 1))
       if (event.key === "]") setSize((value) => Math.min(80, value + 1))
-      if (event.key.toLowerCase() === "e") chooseTool("eraser")
+      if (key === "e") chooseFromKey("eraser")
       const number = Number(event.key)
-      if (number >= 1 && number <= BRUSHES.length) chooseTool(BRUSHES[number - 1].id)
+      if (number >= 1 && number <= BRUSHES.length) chooseFromKey(BRUSHES[number - 1].id)
     }
 
     window.addEventListener("keydown", onKey)
@@ -326,10 +264,9 @@ export function Studio() {
     if (!window.confirm("Clear this sheet?")) return
     strokesRef.current = []
     redoRef.current = []
-    setDirty(true)
-    setStatus("")
+    markDirty()
     rememberHistory()
-    commitRef.current()
+    commit()
   }
 
   function newSheet() {
@@ -339,9 +276,10 @@ export function Studio() {
     loadedIdRef.current = null
     setTitle("")
     setDirty(false)
+    clearDraft()
     setStatus("")
     rememberHistory()
-    commitRef.current()
+    commit()
     router.push("/")
   }
 
@@ -373,7 +311,7 @@ export function Studio() {
     ctx.drawImage(ink, 0, 0)
     const link = document.createElement("a")
     link.href = copy.toDataURL("image/png")
-    link.download = `${fileName(title)}.png`
+    link.download = `${fileSlug(title)}.png`
     link.click()
   }
 
@@ -392,24 +330,22 @@ export function Studio() {
     setStatus("Saving")
     const existing = loadedIdRef.current
     try {
-      const response = await fetch(existing ? `/api/drawings/${existing}` : "/api/drawings", {
-        method: existing ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const drawing = await saveDrawing(
+        {
           title: title.trim() || "Untitled",
-          style: tool === "eraser" ? styleRef.current : tool,
+          style: tool === "eraser" ? styleRef.current : (tool as BrushId),
           width: SHEET_WIDTH,
           height: SHEET_HEIGHT,
           strokes: strokesRef.current,
           preview,
-        }),
-      })
-      const body = (await response.json()) as { drawing?: { id: string }; error?: string }
-      if (!response.ok || !body.drawing) throw new Error(body.error || "Could not save.")
-      loadedIdRef.current = body.drawing.id
+        },
+        existing,
+      )
+      loadedIdRef.current = drawing.id
       setDirty(false)
+      clearDraft()
       setStatus("Saved")
-      if (!existing) router.replace(`/?id=${body.drawing.id}`)
+      if (!existing) router.replace(`/?id=${drawing.id}`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not save.")
     } finally {
@@ -419,88 +355,20 @@ export function Studio() {
 
   return (
     <div className="flex flex-col md:h-[calc(100dvh-3.5rem)] md:flex-row md:overflow-hidden">
-      <aside className="order-2 border-t border-line px-5 py-5 md:order-1 md:w-[240px] md:shrink-0 md:overflow-y-auto md:border-t-0 md:border-r md:px-6 md:py-7">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.18em] text-ash">Brush</p>
-          <div className="mt-3 grid grid-cols-2 gap-1 md:grid-cols-1">
-            {BRUSHES.map((brush, index) => (
-              <button
-                key={brush.id}
-                type="button"
-                aria-label={brush.label}
-                aria-pressed={tool === brush.id}
-                onClick={() => chooseTool(brush.id)}
-                className={`px-2 py-2 text-left text-[13px] ${tool === brush.id ? "bg-ink text-paper" : "hover:bg-wash"}`}
-              >
-                <span className="mr-2 text-[11px] tabular-nums opacity-60">0{index + 1}</span>
-                {brush.label}
-              </button>
-            ))}
-            <button
-              type="button"
-              aria-label="Eraser"
-                aria-pressed={tool === "eraser"}
-              onClick={() => chooseTool("eraser")}
-              className={`px-2 py-2 text-left text-[13px] ${tool === "eraser" ? "bg-ink text-paper" : "hover:bg-wash"}`}
-            >
-              <span className="mr-2 text-[11px] opacity-60">E</span>
-              Eraser
-            </button>
-          </div>
-        </div>
-
-        <label className="mt-7 block">
-          <span className="flex items-center justify-between text-[11px] uppercase tracking-[0.18em] text-ash">
-            Width
-            <span className="text-[12px] normal-case tracking-normal text-ink tabular-nums">{size}</span>
-          </span>
-          <input
-            className="mt-3 w-full"
-            type="range"
-            min={1}
-            max={80}
-            value={size}
-            aria-label="Brush width"
-            onChange={(event) => setSize(Number(event.target.value))}
-          />
-        </label>
-
-        <div className="mt-7" role="radiogroup" aria-label="Ink">
-          <p className="text-[11px] uppercase tracking-[0.18em] text-ash">Ink</p>
-          <div className="mt-3 flex gap-2">
-            {INKS.map((ink) => (
-              <button
-                key={ink.id}
-                type="button"
-                role="radio"
-                aria-checked={color === ink.hex}
-                aria-label={ink.label}
-                disabled={tool === "eraser"}
-                onClick={() => setColor(ink.hex)}
-                className={`h-6 w-6 border disabled:opacity-30 ${color === ink.hex ? "border-ink" : "border-line"}`}
-                style={{ backgroundColor: ink.hex }}
-              />
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-7 flex flex-wrap gap-x-4 gap-y-2 text-[13px]">
-          <button type="button" onClick={undo} disabled={history.undo === 0} className="disabled:opacity-30">
-            Undo
-          </button>
-          <button type="button" onClick={redo} disabled={history.redo === 0} className="disabled:opacity-30">
-            Redo
-          </button>
-          <button type="button" onClick={clearSheet} disabled={history.undo === 0} className="disabled:opacity-30">
-            Clear
-          </button>
-          <button type="button" onClick={newSheet}>
-            New
-          </button>
-        </div>
-
-        <p className="mt-8 text-[12px] leading-5 text-ash">Ctrl+Z undo. [ and ] change the width.</p>
-      </aside>
+      <StudioSidebar
+        tool={tool}
+        size={size}
+        color={color}
+        canUndo={history.undo > 0}
+        canRedo={history.redo > 0}
+        onChooseTool={chooseTool}
+        onSizeChange={setSize}
+        onColorChange={setColor}
+        onUndo={undo}
+        onRedo={redo}
+        onClear={clearSheet}
+        onNew={newSheet}
+      />
 
       <section className="order-1 flex h-[68dvh] min-h-[440px] flex-col md:order-2 md:h-auto md:min-h-0 md:flex-1">
         <div ref={frameRef} className="flex min-h-0 flex-1 items-center justify-center bg-desk">
@@ -522,7 +390,7 @@ export function Studio() {
               value={title}
               onChange={(event) => {
                 setTitle(event.target.value)
-                setDirty(true)
+                markDirty()
               }}
               placeholder="Untitled"
               maxLength={80}
