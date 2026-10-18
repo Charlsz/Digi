@@ -1,3 +1,4 @@
+import { clamp, rgba } from "@/lib/math"
 import type { Point, Stroke, ToolId } from "@/lib/types"
 
 type Stamp = {
@@ -11,18 +12,6 @@ type Stamp = {
 function hash(index: number, salt: number) {
   const value = Math.sin(index * 127.1 + salt * 311.7) * 43758.5453
   return value - Math.floor(value)
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value))
-}
-
-function rgba(hex: string, alpha: number) {
-  const value = Number.parseInt(hex.slice(1), 16)
-  const red = (value >> 16) & 255
-  const green = (value >> 8) & 255
-  const blue = value & 255
-  return `rgba(${red}, ${green}, ${blue}, ${alpha})`
 }
 
 function dot(
